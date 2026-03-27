@@ -1,0 +1,9 @@
+numpy>=2.2
+scipy>=1.15
+matplotlib>=3.10
+pandas>=2.2
+cvxopt>=1.3
+tqdm>=4.0
+shapely>=2.0
+# rvo2 — install separately: pip install rvo2
+#         or build from: https://github.com/sybrenstuvel/Python-RVO2
