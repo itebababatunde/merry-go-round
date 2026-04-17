@@ -69,6 +69,8 @@ class Robot:
         self.mode          = RobotMode.GOAL
         self.roundabout_id = None
         self.escape_perp_count = 0
+        self.escape_cooldown   = 0   # steps remaining before RECEIVE_MGR can recruit
+        self.mgr_step_count    = 0   # total steps spent in MGR mode
 
         self.arrived      = False
         self.arrival_time = None

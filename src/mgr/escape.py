@@ -74,18 +74,25 @@ def is_escapable(robot, C, all_robots: list,
     # Condition 1 — Perpendicularity (with hysteresis)
     # Paper: vic ⊥ vig  (C.c − xi  orthogonal to  gi − xi)
     # ------------------------------------------------------------------
-    v_ic = C.center - robot.pos          # robot → roundabout center
-    v_ig = robot.goal - robot.pos        # robot → goal
+    # Outward radial from roundabout center to robot
+    outward = robot.pos - C.center
+    dist_ic = float(np.linalg.norm(outward))   # ‖xi − C.c‖, used for sector_radius
+    v_ig    = robot.goal - robot.pos            # robot → goal
+    norm_ig = float(np.linalg.norm(v_ig))
 
-    norm_ic = np.linalg.norm(v_ic)
-    norm_ig = np.linalg.norm(v_ig)
-
-    if norm_ic < 1e-6 or norm_ig < 1e-6:
+    if dist_ic < 1e-6 or norm_ig < 1e-6:
         # Degenerate: robot at center or at goal — do not escape yet
         robot.escape_perp_count = 0
         return False
 
-    cos_angle = abs(float(v_ic @ v_ig) / (norm_ic * norm_ig))
+    # vic = CCW tangential velocity direction at the robot's current orbit position.
+    # Rotate outward radial 90° CCW: [x, y] → [-y, x], then normalise.
+    # The paper's "vic ⊥ vig" means the robot's orbital velocity is perpendicular
+    # to its goal direction — i.e., the goal lies in the outward radial direction,
+    # the natural exit point of the orbit.
+    v_ic = np.array([-outward[1], outward[0]]) / dist_ic   # unit CCW tangent
+
+    cos_angle = abs(float(v_ic @ v_ig) / norm_ig)
     perp_ok = cos_angle < _PERP_COS_THRESH
 
     if perp_ok:
@@ -108,9 +115,32 @@ def is_escapable(robot, C, all_robots: list,
     # Sector parameters
     delta_theta = (DELTA_THETA_FREE if env_type in ('free', 'swap')
                    else DELTA_THETA_OBS)
-    sector_radius = norm_ic + DELTA_COMM   # ‖C.c − xi‖ + δsensing
+    sector_radius = C.radius + DELTA_COMM  # C.r + δsensing (paper: uses ring radius, not actual dist)
 
-    # Check other robots
+    # Pre-escape proximity safety check: only block escape if a non-co-member
+    # robot is within D_SAFE AND is inside the escape sector (i.e., directly
+    # in the escape path). Co-members are excluded since CBF between co-members
+    # is already suppressed. For dense scenarios (N=40/60 swap), robots from
+    # adjacent roundabouts may always be within D_SAFE in the perpendicular
+    # direction, but NOT in the escape sector — blocking escape in that case
+    # causes permanent deadlock (robots never escape).
+    co_member_ids = set(C.members) if C is not None else set()
+    for other in all_robots:
+        if other.id == robot.id or other.arrived:
+            continue
+        if other.id in co_member_ids:
+            continue   # co-members already skip CBF; don't block escape
+        if float(np.linalg.norm(other.pos - robot.pos)) >= D_SAFE:
+            continue
+        # Near robot: only block if it is also inside the escape sector
+        d_vec = other.pos - C.center
+        d_dist = float(np.linalg.norm(d_vec))
+        if d_dist <= sector_radius:
+            d_angle = math.atan2(d_vec[1], d_vec[0])
+            if abs(_wrap_angle(d_angle - outward_angle)) <= delta_theta:
+                return False   # near robot is in the escape sector — block
+
+    # Check other robots in the escape sector.
     for other in all_robots:
         if other.id == robot.id or other.arrived:
             continue
@@ -138,15 +168,22 @@ def is_escapable(robot, C, all_robots: list,
     return True
 
 
+_ESCAPE_COOLDOWN_STEPS = 40   # ≈ 2 s at DT=0.05 — prevents immediate re-join
+
+
 def escape_robot(robot, C) -> None:
     """
     Transition robot out of MGR mode back to GOAL mode.
 
     Paper Algorithm 1 ESCAPE_MGR (line 29): ai.mode ← GOAL.
     Also cleans up the roundabout membership and resets the hysteresis counter.
+    Sets escape_cooldown so RECEIVE_MGR does not immediately re-recruit this
+    robot into an adjacent roundabout before it has moved away.
     """
     if robot.id in C.members:
         C.members.remove(robot.id)
     robot.mode = RobotMode.GOAL
     robot.roundabout_id = None
     robot.escape_perp_count = 0
+    robot.escape_cooldown = _ESCAPE_COOLDOWN_STEPS
+    robot.mgr_step_count = 0

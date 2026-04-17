@@ -295,28 +295,47 @@ class Environment:
         self, n_robots: int
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """
-        Swap scenario: robots are placed 15 m apart on opposite sides of the
-        workspace (paper Section V-A).
+        Swap scenario: N/2 robots start on the left heading right; N/2 start
+        on the right heading left. Each pair shares the same y-coordinate so
+        robots travel on directly opposing paths — the canonical head-on
+        deadlock test from paper Section V-A.
 
-        Implementation:
-            Starts are sampled in a narrow band near the left wall:
-                x ∈ [boundary, boundary + 1.0]
-            Goals are placed near the right wall:
-                x ∈ [size − boundary − 1.0, size − boundary]
-            y coordinates are independently sampled for starts; goals share
-            the same y so each robot has a direct cross-workspace trajectory.
+        Placement is grid-based (equally spaced in y) so packing always
+        succeeds regardless of N. The RNG shuffles which y-slots are assigned
+        to which robot index, preserving per-instance variety.
         """
         boundary = 2 * R_SAFE       # ≈ 0.44 m
-        band_w   = 0.06             # narrow band → starts at x ≈ 0.44–0.50 m, ≈15 m gap
+        x_left  = boundary
+        x_right = self.size - boundary
 
-        starts = self._sample_positions(
-            n_robots,
-            min_sep=D_SAFE,
-            boundary=boundary,
-            x_range=(boundary, boundary + band_w),
-        )
-        # Goals mirror: same y, right side of workspace
-        goals = [np.array([self.size - p[0], p[1]]) for p in starts]
+        # How many y-slots do we need?  ceil(N/2) pairs.
+        n_pairs = math.ceil(n_robots / 2)
+        y_lo = boundary
+        y_hi = self.size - boundary
+        # Space pairs evenly; y-gap = (y_hi - y_lo) / n_pairs ≥ D_SAFE for
+        # N ≤ 2 * floor((y_hi-y_lo)/D_SAFE) ≈ 2 * 34 = 68 — well above our max.
+        y_positions = [
+            y_lo + (i + 0.5) * (y_hi - y_lo) / n_pairs
+            for i in range(n_pairs)
+        ]
+
+        # Shuffle y-slot assignments so each instance is distinct
+        slot_order = self.rng.permutation(n_pairs)
+
+        starts: List[np.ndarray] = []
+        goals:  List[np.ndarray] = []
+
+        for k in range(n_robots):
+            y = float(y_positions[slot_order[k % n_pairs]])
+            if k < n_robots // 2:
+                # First half: left → right
+                starts.append(np.array([x_left,  y]))
+                goals.append( np.array([x_right, y]))
+            else:
+                # Second half: right → left
+                starts.append(np.array([x_right, y]))
+                goals.append( np.array([x_left,  y]))
+
         return starts, goals
 
     # ------------------------------------------------------------------

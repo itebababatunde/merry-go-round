@@ -27,7 +27,8 @@ import numpy as np
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from experiments.config import DT, T_MAX, DELTA_COMM, D_SAFE, W_MAX
+from experiments.config import DT, T_MAX, DELTA_COMM, D_SAFE, W_MAX, V_MAX
+import math as _math
 
 from src.robot import RobotMode
 from src.controllers.goal_controller import goal_control
@@ -56,18 +57,24 @@ def _sdf_gradient(obs, pos: np.ndarray) -> np.ndarray:
     return np.array([gx, gy])
 
 
-def _right_hand_rule(robot, w: float, obstacles: list) -> float:
+def _right_hand_rule(robot, v: float, w: float, obstacles: list) -> tuple[float, float]:
     """
-    Post-QP ω override implementing the paper's right-hand rule (§III-E).
+    Post-QP ω override and v scaling implementing the paper's right-hand rule (§III-E).
 
     Finds the nearest obstacle within DELTA_COMM. If found, blends the QP
     output ω toward the clockwise tangent of that obstacle's surface. The
     blend strength scales linearly: 0 at DELTA_COMM, 1 at the surface.
 
+    Also scales v down linearly as the robot approaches an obstacle surface,
+    reaching v=0 at the surface. This prevents obstacle penetration which
+    would otherwise occur since the QP has no obstacle CBF constraints.
+
     Parameters
     ----------
     robot : Robot
         The robot being controlled. Reads .pos, .theta.
+    v : float
+        Linear velocity from QP (before override).
     w : float
         Angular velocity from QP (before override).
     obstacles : list
@@ -75,8 +82,8 @@ def _right_hand_rule(robot, w: float, obstacles: list) -> float:
 
     Returns
     -------
-    float
-        Possibly overridden angular velocity, clipped to ±W_MAX.
+    (v, w) : (float, float)
+        Possibly modified linear and angular velocities.
     """
     nearest_d = float('inf')
     nearest_obs = None
@@ -87,14 +94,26 @@ def _right_hand_rule(robot, w: float, obstacles: list) -> float:
             nearest_obs = obs
 
     if nearest_obs is None or nearest_d >= DELTA_COMM:
-        return w
+        return v, w
 
-    # Outward surface normal via SDF gradient
+    # Outward surface normal via SDF gradient (needed for both v-scaling and ω)
     grad = _sdf_gradient(nearest_obs, robot.pos)
     grad_norm = np.linalg.norm(grad)
     if grad_norm < 1e-8:
-        return w
+        return v, w
     n_hat = grad / grad_norm  # unit outward normal
+
+    # Scale v down only when robot is heading toward the obstacle.
+    # approach_rate = component of velocity in the inward-normal direction.
+    # If positive (heading inward), scale v proportionally to proximity.
+    # If zero/negative (tangential or moving away), leave v unchanged.
+    # This prevents obstacle penetration without slowing tangential orbit motion.
+    approach_rate = -(n_hat[0] * math.cos(robot.theta) + n_hat[1] * math.sin(robot.theta))
+    if approach_rate > 0 and nearest_d < D_SAFE:
+        v_scale = float(np.clip(nearest_d / D_SAFE, 0.0, 1.0))
+        v_out = v * v_scale
+    else:
+        v_out = v
 
     # Clockwise (right-hand) tangent: rotate n_hat by -90°
     t_hat = np.array([n_hat[1], -n_hat[0]])
@@ -107,7 +126,7 @@ def _right_hand_rule(robot, w: float, obstacles: list) -> float:
     # Blend: strength → 1 as robot approaches surface
     strength = float(np.clip(1.0 - nearest_d / DELTA_COMM, 0.0, 1.0))
     w_blended = (1.0 - strength) * w + strength * w_rhr
-    return float(np.clip(w_blended, -W_MAX, W_MAX))
+    return v_out, float(np.clip(w_blended, -W_MAX, W_MAX))
 
 
 class Simulator:
@@ -198,6 +217,10 @@ class Simulator:
             pending: dict = {}
             new_qp_info: dict = {}
 
+            # Build snapshot of active robots for angular gap correction in mgr_control.
+            # Must be computed once before the loop so all robots see the same state.
+            robot_map = {r.id: r for r in active}
+
             for r in active:
                 neighbors = [
                     n for n in active
@@ -216,14 +239,38 @@ class Simulator:
                         r.roundabout_id = None
                         v_des, w_des = goal_control(r)
                     else:
-                        v_des, w_des = mgr_control(r, C)
+                        v_des, w_des = mgr_control(r, C, robot_map)
+
+                # Cold-start fix for co-member CBF nb_contribution:
+                # When a co-member hasn't started moving yet (velocity ≈ 0),
+                # temporarily substitute its predicted CCW orbit velocity so that
+                # the nb_contribution in clf_cbf_qp is non-zero and the orbit
+                # bootstraps correctly. Restored immediately after the QP solve.
+                _cold_start_restored = []
+                if r.mode == RobotMode.MGR and r.roundabout_id is not None:
+                    C_r = roundabouts.get(r.roundabout_id)
+                    if C_r is not None:
+                        for nb in neighbors:
+                            if (nb.mode == RobotMode.MGR
+                                    and nb.roundabout_id == r.roundabout_id
+                                    and float(np.linalg.norm(nb.velocity)) < 0.05):
+                                nb_dx = nb.pos[0] - C_r.center[0]
+                                nb_dy = nb.pos[1] - C_r.center[1]
+                                nb_rr = _math.hypot(nb_dx, nb_dy)
+                                if nb_rr > 1e-6:
+                                    _cold_start_restored.append((nb, nb.velocity.copy()))
+                                    nb.velocity = V_MAX * np.array([-nb_dy, nb_dx]) / nb_rr
 
                 # Safety filter
                 v, w, info = clf_cbf_qp(r, neighbors, obstacles, v_des, w_des)
+
+                # Restore any temporarily predicted co-member velocities
+                for nb, saved_vel in _cold_start_restored:
+                    nb.velocity = saved_vel
                 new_qp_info[r.id] = info
 
-                # Right-hand rule ω override for obstacle avoidance
-                w = _right_hand_rule(r, w, obstacles)
+                # Right-hand rule: ω override + v scaling for obstacle avoidance
+                v, w = _right_hand_rule(r, v, w, obstacles)
 
                 pending[r.id] = (v, w)
 

@@ -57,7 +57,7 @@ DELTA_C = 2.0               # m — roundabout proximity threshold δ_c:
                              #     join existing roundabout if candidate center
                              #     is within DELTA_C of an existing one
 
-MGR_RADIUS = 0.3            # m — initial roundabout radius C.r
+MGR_RADIUS = 0.3            # m — initial roundabout radius C.r (paper §V-A: "C.r = 0.3 m")
 K_INCREMENT = 0.1           # m — radius increment per extra member robot
 
 KP_RAD = 0.05               # proportional radial gain k_p (Eq. 9)
@@ -80,14 +80,14 @@ EPSILON_GOAL = R_SAFE - 0.01      # m ≈ 0.21 m
 DT   = 0.05                 # s — simulation timestep
 T_MAX = 120.0               # s — 2-minute timeout per instance
 
-N_INSTANCES = 20            # number of random instances per (env, N) combination
+N_INSTANCES = 5             # number of random instances per (env, N) combination
 
 # ---------------------------------------------------------------------------
 # Experiment configurations  (robot counts per environment)
 # ---------------------------------------------------------------------------
 ROBOT_COUNTS = {
-    "free":   [20, 40, 60, 80, 100, 120],
-    "circ15": [20, 40, 60, 80, 100],
-    "rect15": [20, 40, 60, 80],
-    "swap":   [20, 40, 60],
+    "free":   [20],
+    "circ15": [20],
+    "rect15": [20],
+    "swap":   [20],
 }

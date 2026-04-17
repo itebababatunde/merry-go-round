@@ -94,35 +94,53 @@ def run_one(args):
 
 if __name__ == '__main__':
     # Build the full task list: 18 (env, N) configs × 20 instances × 3 methods
-    tasks = [
+    all_tasks = [
         (env_type, N, idx, method)
         for env_type, ns in ROBOT_COUNTS.items()
         for N in ns
         for idx in range(N_INSTANCES)
         for method in METHODS
     ]
-    total = len(tasks)  # should be 1,080
+    total = len(all_tasks)  # should be 1,080
 
     out_path = pathlib.Path('results/raw_results.csv')
     out_path.parent.mkdir(exist_ok=True)
 
-    n_workers = max(1, multiprocessing.cpu_count() - 1)
+    # Resume support: skip already-completed (env, N, instance_idx, method) tuples.
+    done = set()
+    if out_path.exists():
+        try:
+            with open(out_path, newline='') as f:
+                for row in csv.DictReader(f):
+                    done.add((row['env'], int(row['N']), int(row['instance_idx']), row['method']))
+        except Exception:
+            pass
+
+    tasks = [t for t in all_tasks if (t[0], t[1], t[2], t[3]) not in done]
+    skipped = len(all_tasks) - len(tasks)
+
+    n_workers = 1
     print(f"Starting {total} runs on {n_workers} workers → {out_path}")
+    if skipped:
+        print(f"Resuming: {skipped} already done, {len(tasks)} remaining.")
     print(f"Environments: {list(ROBOT_COUNTS.keys())}")
     print(f"Methods: {METHODS}")
     print()
 
-    completed = 0
+    completed = skipped
     with (
         multiprocessing.Pool(n_workers) as pool,
-        open(out_path, 'w', newline='') as f,
+        open(out_path, 'a', newline='') as f,
     ):
+        write_header = skipped == 0
         writer = csv.DictWriter(f, fieldnames=FIELDS, extrasaction='ignore')
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
 
         for row in tqdm.tqdm(
             pool.imap_unordered(run_one, tasks),
             total=total,
+            initial=skipped,
             desc='Running experiments',
             unit='run',
         ):

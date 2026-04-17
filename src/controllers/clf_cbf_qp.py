@@ -131,8 +131,17 @@ def clf_cbf_qp(
     # --- (1) CLF constraint (soft, uses slack δ at index 2) ---
     V_clf = (x - gx) ** 2 + (y - gy) ** 2     # = ‖p − g‖²
     Lg_V_v = 2.0 * (x - gx) * cos_t + 2.0 * (y - gy) * sin_t
-    # Row: [Lg_V_v, 0, −1] · u ≤ −λ·V
-    G_rows.append([Lg_V_v, 0.0, -1.0])
+    # Clamp Lg_V_v to min(Lg_V_v, 0) in the CLF row.
+    # When heading TOWARD goal (Lg_V_v < 0): normal CLF — encourages v > 0 to
+    #   speed convergence; larger v reduces required δ slack.
+    # When heading AWAY from goal (Lg_V_v > 0): row becomes [0, 0, -1] ≤ -λV,
+    #   i.e., δ ≥ λV absorbs the violation but v is unrestricted. Without
+    #   this clamp, the QP forces v → 0 whenever Lg_V_v * λ * V_clf ≈ 2*v_des
+    #   (which happens exactly when the RHR has turned the robot to face away from
+    #   the goal near an obstacle), creating a permanent deadlock fixed point.
+    Lg_V_v_clf = min(Lg_V_v, 0.0)
+    # Row: [Lg_V_v_clf, 0, −1] · u ≤ −λ·V
+    G_rows.append([Lg_V_v_clf, 0.0, -1.0])
     h_vals.append(-GAMMA_CLF * V_clf)
 
     # --- (2) CBF — inter-robot collision avoidance ---
@@ -149,9 +158,27 @@ def clf_cbf_qp(
         if Lg_h_norm < _LGH_NORM_THRESH:
             deadlock_flags.add(nb.id)
 
-        # Row: [−Lg_h_v, 0, 0] · u ≤ β·h_ij
+        # Row: [−Lg_h_v, 0, 0] · u ≤ β·h_ij − neighbor-velocity term
+        # Full dh/dt = 2(pi-pj)·(vi-vj). QP controls vi only; move vj to RHS:
+        #   -2(pi-pj)·vi ≤ α*h - 2(pi-pj)·vj
+        # nb_contribution is always used — it is essential for co-members
+        # orbiting CCW where Lg_h_v_i can be negative (co-member just ahead).
+        # Without nb_contribution the QP forces v≤0, stopping the orbit.
+        # nb_contribution from the co-member's own tangential velocity
+        # relaxes the constraint and allows both to orbit freely.
+        #
+        # h_cbf uses the FULL h_ij (including negative values). When h < 0
+        # (robots already inside D_SAFE and neighbor is stopped, nb≈0), the
+        # constraint forces active separation:
+        #   heading toward neighbor (Lg_h_v < 0): v ≤ negative (go backward)
+        #   heading away from neighbor (Lg_h_v > 0): v ≥ positive (go forward)
+        # Without this, stopped robots with h<0 have RHS=0 and the QP returns
+        # v=0, leaving the robots permanently stuck in collision.
+        nb_vel = nb.velocity  # world-frame [vx, vy]; may be predicted orbit vel
+        nb_contribution = 2.0 * dpx * nb_vel[0] + 2.0 * dpy * nb_vel[1]
+        h_cbf = ALPHA_CBF * h_ij if h_ij >= 0 else 0.0
         G_rows.append([-Lg_h_v, 0.0, 0.0])
-        h_vals.append(ALPHA_CBF * h_ij)
+        h_vals.append(h_cbf - nb_contribution)
 
     # Obstacle avoidance is handled by a right-hand rule in the simulator
     # (paper §III-E), NOT by QP constraint rows here.
