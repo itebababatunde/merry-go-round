@@ -115,10 +115,13 @@ def _right_hand_rule(robot, v: float, w: float, obstacles: list) -> tuple[float,
     else:
         v_out = v
 
-    # Clockwise (right-hand) tangent: rotate n_hat by -90°
-    t_hat = np.array([n_hat[1], -n_hat[0]])
+    # Choose CW or CCW tangent based on which reduces angular error toward goal.
+    # Always-CW routes robots away from goal ~50% of the time around obstacles.
+    t_cw  = np.array([ n_hat[1], -n_hat[0]])   # CW tangent
+    t_ccw = np.array([-n_hat[1],  n_hat[0]])   # CCW tangent
+    goal_dir = robot.goal - robot.pos
+    t_hat = t_cw if (np.dot(t_cw, goal_dir) >= np.dot(t_ccw, goal_dir)) else t_ccw
 
-    # Desired heading to track the CW tangent
     phi_rhr = math.atan2(t_hat[1], t_hat[0])
     heading_err = _wrap_angle(phi_rhr - robot.theta)
     w_rhr = float(np.clip(_RHR_K_TURN * heading_err, -W_MAX, W_MAX))
