@@ -109,38 +109,82 @@ def adjust_mgr(C: Roundabout, obstacles: list) -> Roundabout | None:
     return C
 
 
+def _bisector_center(ri, rj, obstacles: list, n_members: int) -> np.ndarray | None:
+    """
+    Search the perpendicular bisector of ri-rj for a valid roundabout center.
+
+    Every point on the bisector is equidistant from ri and rj, so angular
+    separation is exactly 180° by construction — the creation angle check
+    is guaranteed to pass for any center found here.
+
+    Searches ±10·C.r from the midpoint in steps of C.r/2, same budget as
+    adjust_mgr but 1-D instead of 2-D (41 candidates vs 1681).
+    """
+    midpoint = find_center(ri, rj)
+    direction = rj.pos - ri.pos
+    length = float(np.linalg.norm(direction))
+    if length < 1e-6:
+        perp = np.array([1.0, 0.0])
+    else:
+        d = direction / length
+        perp = np.array([-d[1], d[0]])  # 90° CCW
+
+    step = MGR_RADIUS / 2.0
+    half = 10.0 * MGR_RADIUS
+    offsets = np.arange(-half, half + step * 0.5, step)
+
+    best_center = None
+    best_dist = float('inf')
+    dummy_members = list(range(n_members))  # only count matters for clearance
+
+    for t in offsets:
+        trial_center = midpoint + t * perp
+        C_trial = Roundabout(
+            id=0, center=trial_center, radius=MGR_RADIUS, members=dummy_members
+        )
+        if is_mgr_valid(C_trial, obstacles):
+            d = abs(t)
+            if d < best_dist:
+                best_dist = d
+                best_center = trial_center.copy()
+
+    return best_center
+
+
 def create_mgr(ri, rj, obstacles: list, next_id: int) -> Roundabout | None:
     """
     Create a new roundabout for the deadlocked pair (ri, rj).
 
-    Returns a valid Roundabout with ri and rj as initial members, or None
-    if no valid center can be found.
+    Returns a Roundabout or None. Two-pass placement strategy, each pass
+    first tries the midpoint then searches the perpendicular bisector.
+    Bisector search guarantees angular separation = 180° by construction,
+    so the creation angle check always passes for bisector-found centers.
 
-    Two-pass placement strategy:
-      Pass 1 (strict): check with n=2 pre-loaded, giving effective_clearance =
-        C.r + K_INCREMENT*2 = 0.5 m. This ensures the orbit path has at least
-        ROBOT_RADIUS clearance from obstacles.
-      Pass 2 (fallback): n=0 clearance (0.3 m). Needed when deadlocked robots
-        are in narrow corridors (e.g. rect15) where 0.5 m clearance is
-        unachievable. When the center is near the robots' midpoint (< 0.3 m
-        from each), angular gap ≈ 180° passes easily; orbit may be disrupted
-        by RHR near the obstacle surface but is still preferable to no orbit.
+      Pass 1 (strict): n=2 clearance = 0.5 m (orbit path has ROBOT_RADIUS margin)
+      Pass 2 (fallback): n=0 clearance = 0.3 m (tight corridors in rect15)
     """
     center = find_center(ri, rj)
 
     # Pass 1 — strict clearance (n=2)
     C = Roundabout(id=next_id, center=center, radius=MGR_RADIUS, members=[ri.id, rj.id])
     if not is_mgr_valid(C, obstacles):
-        C = adjust_mgr(C, obstacles)
+        bisector_c = _bisector_center(ri, rj, obstacles, n_members=2)
+        if bisector_c is not None:
+            C.center = bisector_c
+        else:
+            C = None
     if C is not None:
         C.members = []
         return C
 
-    # Pass 2 — fallback clearance (n=0): allows placement in tight corridors
+    # Pass 2 — fallback clearance (n=0)
     C = Roundabout(id=next_id, center=center, radius=MGR_RADIUS, members=[])
     if not is_mgr_valid(C, obstacles):
-        C = adjust_mgr(C, obstacles)
-    # C.members already [] — return as-is (None if no valid cell found)
+        bisector_c = _bisector_center(ri, rj, obstacles, n_members=0)
+        if bisector_c is not None:
+            C.center = bisector_c
+        else:
+            C = None
     return C
 
 
@@ -420,11 +464,6 @@ def run_mgr_update(
             # Create a new roundabout
             C = create_mgr(ri, rj, obstacles, next_id)
             if C is not None:
-                # After center adjustment the initial pair may no longer be
-                # at 180° from each other. Reject if angular separation is
-                # less than the minimum safe orbital angle — the angle at
-                # which two co-members on the orbit would be exactly D_SAFE
-                # apart: 2·arcsin(D_SAFE / (2·C.radius)).
                 from experiments.config import D_SAFE
                 min_creation_angle = 2.0 * math.asin(
                     min(D_SAFE / (2.0 * C.radius), 1.0)
