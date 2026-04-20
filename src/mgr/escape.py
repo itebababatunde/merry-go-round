@@ -168,7 +168,7 @@ def is_escapable(robot, C, all_robots: list,
     return True
 
 
-_ESCAPE_COOLDOWN_STEPS = 40   # ≈ 2 s at DT=0.05 — prevents immediate re-join
+_ESCAPE_COOLDOWN_STEPS = 200  # ≈ 10 s at DT=0.05 — prevents immediate re-join in dense environments
 
 
 def escape_robot(robot, C) -> None:

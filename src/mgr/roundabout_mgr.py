@@ -113,41 +113,31 @@ def _bisector_center(ri, rj, obstacles: list, n_members: int) -> np.ndarray | No
     """
     Search the perpendicular bisector of ri-rj for a valid roundabout center.
 
-    Every point on the bisector is equidistant from ri and rj, so angular
-    separation is exactly 180° by construction — the creation angle check
-    is guaranteed to pass for any center found here.
+    Every bisector point is equidistant from ri and rj → angular separation
+    is exactly 180° by construction. Preferred over ADJUST_MGR when it succeeds
+    because the close, symmetric center gives better escape geometry.
 
-    Searches ±10·C.r from the midpoint in steps of C.r/2, same budget as
-    adjust_mgr but 1-D instead of 2-D (41 candidates vs 1681).
+    Searches ±10·C.r in steps of C.r/2 (41 candidates, same radius as ADJUST_MGR).
     """
     midpoint = find_center(ri, rj)
     direction = rj.pos - ri.pos
     length = float(np.linalg.norm(direction))
-    if length < 1e-6:
-        perp = np.array([1.0, 0.0])
-    else:
-        d = direction / length
-        perp = np.array([-d[1], d[0]])  # 90° CCW
+    perp = np.array([1.0, 0.0]) if length < 1e-6 else np.array([-direction[1], direction[0]]) / length
 
     step = MGR_RADIUS / 2.0
     half = 10.0 * MGR_RADIUS
     offsets = np.arange(-half, half + step * 0.5, step)
+    dummy_members = list(range(n_members))
 
-    best_center = None
-    best_dist = float('inf')
-    dummy_members = list(range(n_members))  # only count matters for clearance
-
+    best_center, best_dist = None, float('inf')
     for t in offsets:
         trial_center = midpoint + t * perp
-        C_trial = Roundabout(
-            id=0, center=trial_center, radius=MGR_RADIUS, members=dummy_members
-        )
+        C_trial = Roundabout(id=0, center=trial_center, radius=MGR_RADIUS, members=dummy_members)
         if is_mgr_valid(C_trial, obstacles):
             d = abs(t)
             if d < best_dist:
                 best_dist = d
                 best_center = trial_center.copy()
-
     return best_center
 
 
@@ -155,36 +145,40 @@ def create_mgr(ri, rj, obstacles: list, next_id: int) -> Roundabout | None:
     """
     Create a new roundabout for the deadlocked pair (ri, rj).
 
-    Returns a Roundabout or None. Two-pass placement strategy, each pass
-    first tries the midpoint then searches the perpendicular bisector.
-    Bisector search guarantees angular separation = 180° by construction,
-    so the creation angle check always passes for bisector-found centers.
+    Paper CREATE_MGR: FIND_CENTER then ADJUST_MGR if center is invalid.
+    We prefer the perpendicular bisector search over ADJUST_MGR when it succeeds:
+    bisector points are equidistant from both robots (180° sep by construction)
+    and stay close to the pair, giving better escape geometry. ADJUST_MGR is
+    the fallback for cases where the bisector direction is obstacle-blocked.
 
-      Pass 1 (strict): n=2 clearance = 0.5 m (orbit path has ROBOT_RADIUS margin)
-      Pass 2 (fallback): n=0 clearance = 0.3 m (tight corridors in rect15)
+    Two-pass strategy to handle tight corridors:
+      Pass 1 (strict): n=2 clearance = 0.5 m — orbit path has ROBOT_RADIUS margin
+      Pass 2 (fallback): n=0 clearance = 0.3 m — for narrow corridors (rect15/circ15)
+
+    Returns a Roundabout with empty members list, or None if no valid center found.
     """
     center = find_center(ri, rj)
 
-    # Pass 1 — strict clearance (n=2)
+    # Pass 1 — try midpoint, then bisector, then full ADJUST_MGR
     C = Roundabout(id=next_id, center=center, radius=MGR_RADIUS, members=[ri.id, rj.id])
     if not is_mgr_valid(C, obstacles):
         bisector_c = _bisector_center(ri, rj, obstacles, n_members=2)
         if bisector_c is not None:
             C.center = bisector_c
         else:
-            C = None
+            C = adjust_mgr(C, obstacles)
     if C is not None:
         C.members = []
         return C
 
-    # Pass 2 — fallback clearance (n=0)
+    # Pass 2 — same order but with n=0 clearance
     C = Roundabout(id=next_id, center=center, radius=MGR_RADIUS, members=[])
     if not is_mgr_valid(C, obstacles):
         bisector_c = _bisector_center(ri, rj, obstacles, n_members=0)
         if bisector_c is not None:
             C.center = bisector_c
         else:
-            C = None
+            C = adjust_mgr(C, obstacles)
     return C
 
 
@@ -303,9 +297,9 @@ def run_mgr_update(
     # Track how many steps each robot has been in MGR mode so that
     # robots stuck alone in a roundabout can be force-released.
     # ------------------------------------------------------------------
-    _MGR_TIMEOUT_STEPS      = 600    # 30 s — general MGR timeout; halved so force-released robots have ≥30 s left to navigate in GOAL mode
-    _MGR_ALONE_TIMEOUT_STEPS = 80    # 4 s — fast release when alone; escape_cooldown=40 prevents immediate re-join
-    _FORCE_RELEASE_COOLDOWN  = 80    # 4 s — prevent immediate re-join after force-release
+    _MGR_TIMEOUT_STEPS      = 300    # 15 s — orbit timeout; robots joining late still escape before T_MAX
+    _MGR_ALONE_TIMEOUT_STEPS = 60    # 3 s — fast release when alone
+    _FORCE_RELEASE_COOLDOWN  = 300   # 15 s — long enough to escape orbit zone in dense obstacle envs
 
     for r in active_robots:
         if r.escape_cooldown > 0:
@@ -351,8 +345,25 @@ def run_mgr_update(
             # within a reasonable time. Threshold: center distance ≤ C.radius + DELTA_COMM.
             if np.linalg.norm(ri.pos - C.center) > C.radius + DELTA_COMM:
                 continue
-            # Enforce angular separation so members don't cluster at the same angle.
-            if not _angular_gap_ok(ri, C, robot_map):
+            # Angular gap check: prevent joining too close to an existing co-member's
+            # orbit angle, which can cause near-collisions during simultaneous convergence
+            # (CBF degenerates when Lg_h→0 near coincident orbit positions).
+            # Override: ri's goal path passes through the roundabout disk (clearance ≤
+            # radius + D_SAFE). These robots are permanently deflected by orbiting robots
+            # yet never detected as GOAL-GOAL deadlocks — they must join to make progress.
+            from experiments.config import D_SAFE as _D_SAFE
+            ri_to_goal = ri.goal - ri.pos
+            ri_goal_len = float(np.linalg.norm(ri_to_goal))
+            if ri_goal_len > 1e-6:
+                t_proj = float(np.clip(
+                    np.dot(C.center - ri.pos, ri_to_goal) / (ri_goal_len ** 2), 0.0, 1.0
+                ))
+                path_clearance = float(np.linalg.norm(ri.pos + t_proj * ri_to_goal - C.center))
+            else:
+                path_clearance = float(np.linalg.norm(ri.pos - C.center))
+            path_blocked = path_clearance <= C.radius + _D_SAFE
+
+            if not path_blocked and not _angular_gap_ok(ri, C, robot_map):
                 continue
             # Validate (and adjust) before joining
             if not is_mgr_valid(C, obstacles):
@@ -365,8 +376,10 @@ def run_mgr_update(
     # Step B — Deadlock detection (Algorithm 1, lines 4–27)
     # Only GOAL-mode robots check for deadlocks with their neighbours.
     # ------------------------------------------------------------------
-    # Collect candidate pairs
-    goal_robots = [r for r in active_robots if r.mode == RobotMode.GOAL]
+    # Collect candidate pairs — skip recently-escaped robots so they have time
+    # to navigate away from the roundabout zone before entering a new orbit.
+    goal_robots = [r for r in active_robots
+                   if r.mode == RobotMode.GOAL and r.escape_cooldown == 0]
     candidate_pairs = []
     seen = set()
 
@@ -400,7 +413,7 @@ def run_mgr_update(
                 if C is not None:
                     if not is_mgr_valid(C, obstacles):
                         C = adjust_mgr(C, obstacles)
-                    if C is not None and _angular_gap_ok(goal_robot, C, robot_map):
+                    if C is not None:
                         join_mgr(goal_robot, C)
             continue
 
@@ -416,17 +429,17 @@ def run_mgr_update(
         ]
 
         if nearby:
-            # Join the nearest existing roundabout — only if both robots
-            # satisfy angular separation from existing members and each other.
+            # Join the nearest existing roundabout (paper Alg. 1 lines 11–14).
+            # Angular gap check retained for EXISTING roundabouts to prevent
+            # multiple robots piling onto one orbit at close angular positions,
+            # which can cause CBF failure during simultaneous convergence.
+            # For newly-created roundabouts (else branch), robots join directly.
             C = min(nearby, key=lambda C: np.linalg.norm(C.center - c))
             if not is_mgr_valid(C, obstacles):
                 C = adjust_mgr(C, obstacles)
             if C is not None:
-                # Check ri first; if it passes, C has n+1 members notionally,
-                # so rj must clear n+2.
                 ri_ok = _angular_gap_ok(ri, C, robot_map)
                 if ri_ok:
-                    # Simulate ri joining to check rj's gap against n+1 members
                     C.members.append(ri.id)
                     rj_ok = _angular_gap_ok(rj, C, robot_map)
                     C.members.remove(ri.id)
@@ -439,46 +452,19 @@ def run_mgr_update(
                     join_mgr(ri, C)
                 elif rj_ok:
                     join_mgr(rj, C)
-                else:
-                    # Nearby roundabout cannot accommodate either robot in this pair
-                    # (angular gap full). Create a fresh roundabout instead of leaving
-                    # them unhandled — an unhandled pair loops forever in GOAL mode.
-                    from experiments.config import D_SAFE
-                    C_new = create_mgr(ri, rj, obstacles, next_id)
-                    if C_new is not None:
-                        min_creation_angle = 2.0 * math.asin(
-                            min(D_SAFE / (2.0 * C_new.radius), 1.0)
-                        )
-                        ri_angle = _angle_from_center(ri, C_new.center)
-                        rj_angle = _angle_from_center(rj, C_new.center)
-                        ang_sep = abs(math.atan2(
-                            math.sin(ri_angle - rj_angle),
-                            math.cos(ri_angle - rj_angle)
-                        ))
-                        if ang_sep >= min_creation_angle:
-                            roundabouts[C_new.id] = C_new
-                            next_id += 1
-                            join_mgr(ri, C_new)
-                            join_mgr(rj, C_new)
         else:
-            # Create a new roundabout
+            # No nearby roundabout — create a new one (paper Alg. 1 lines 15–18).
+            # No angular separation gate — paper Algorithm 1 joins unconditionally.
+            # Safety: angular gap correction in mgr_control slows the following robot
+            # to near-zero while the leading robot races CCW, rapidly increasing the
+            # gap. By the time the slower robot reaches the orbit, the leading robot
+            # has orbited far enough to ensure physical separation ≥ D_SAFE.
             C = create_mgr(ri, rj, obstacles, next_id)
             if C is not None:
-                from experiments.config import D_SAFE
-                min_creation_angle = 2.0 * math.asin(
-                    min(D_SAFE / (2.0 * C.radius), 1.0)
-                )
-                ri_angle = _angle_from_center(ri, C.center)
-                rj_angle = _angle_from_center(rj, C.center)
-                ang_sep = abs(math.atan2(
-                    math.sin(ri_angle - rj_angle),
-                    math.cos(ri_angle - rj_angle)
-                ))
-                if ang_sep >= min_creation_angle:
-                    roundabouts[C.id] = C
-                    next_id += 1
-                    join_mgr(ri, C)
-                    join_mgr(rj, C)
+                roundabouts[C.id] = C
+                next_id += 1
+                join_mgr(ri, C)
+                join_mgr(rj, C)
 
     # ------------------------------------------------------------------
     # Step C — Prune empty roundabouts
