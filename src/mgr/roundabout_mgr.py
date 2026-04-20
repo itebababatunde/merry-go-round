@@ -22,7 +22,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from experiments.config import (
-    MGR_RADIUS, DELTA_COMM, DELTA_C, WORKSPACE
+    MGR_RADIUS, DELTA_COMM, DELTA_C, WORKSPACE, D_SAFE as _D_SAFE
 )
 from src.robot import RobotMode
 from src.mgr.roundabout import Roundabout
@@ -351,7 +351,6 @@ def run_mgr_update(
             # Override: ri's goal path passes through the roundabout disk (clearance ≤
             # radius + D_SAFE). These robots are permanently deflected by orbiting robots
             # yet never detected as GOAL-GOAL deadlocks — they must join to make progress.
-            from experiments.config import D_SAFE as _D_SAFE
             ri_to_goal = ri.goal - ri.pos
             ri_goal_len = float(np.linalg.norm(ri_to_goal))
             if ri_goal_len > 1e-6:

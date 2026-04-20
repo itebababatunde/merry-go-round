@@ -109,7 +109,7 @@ def _right_hand_rule(robot, v: float, w: float, obstacles: list) -> tuple[float,
     # If zero/negative (tangential or moving away), leave v unchanged.
     # This prevents obstacle penetration without slowing tangential orbit motion.
     approach_rate = -(n_hat[0] * math.cos(robot.theta) + n_hat[1] * math.sin(robot.theta))
-    if approach_rate > 0 and nearest_d < D_SAFE:
+    if approach_rate > 1e-6 and nearest_d < D_SAFE:  # threshold prevents float noise (sin(π)≈1.2e-16)
         v_scale = float(np.clip(nearest_d / D_SAFE, 0.0, 1.0))
         v_out = v * v_scale
     else:
