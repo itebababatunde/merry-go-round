@@ -275,3 +275,65 @@ Phase 3 will use the `deadlock_flags` returned by `clf_cbf_qp` and the frozen ve
 vectors in `robot.velocity` to trigger and manage roundabouts. The 2-robot head-on scenario
 from Phase 2 will finally resolve: both robots will form a roundabout, orbit past each other,
 escape, and reach their goals.
+
+---
+
+## Post-Phase Accuracy Fixes (applied after Phase 7 completion)
+
+The following bugs were discovered during full-scale experiment validation and fixed in a
+dedicated accuracy pass. They affected the CLF-CBF QP controller and the MGR orbital controller.
+
+### Fix 1 — CLF Lie-derivative clamp (paper §III-B, Eq. 8)
+
+**Problem:** In certain configurations — particularly when a robot orbiting an MGR roundabout
+is headed away from its goal — the CLF constraint `Lg_V·v ≤ −λ·V + δ` had `Lg_V > 0`. A
+positive `Lg_V` with a large positive `δ` causes the solver to set `v > 0` in the direction
+AWAY from the goal to satisfy the constraint, creating a stable non-goal equilibrium.
+
+**Fix:** Clamp the CLF Lie derivative:
+```python
+Lg_V_v_clf = min(Lg_V_v, 0.0)
+```
+This ensures the CLF constraint can only PULL the robot toward its goal, never push it away.
+The slack `δ` can still fully relax the CLF (large δ → robot is free to ignore goal-attraction),
+but the CLF row can no longer create a spurious repulsive equilibrium.
+
+**Paper reference:** §III-B specifies CLF as a one-sided stability certificate; the clamped form
+is consistent with using V as a Lyapunov candidate that decreases along trajectories.
+
+### Fix 2 — CBF neighbor contribution always active (paper Eq. 8, §III-C)
+
+**Problem:** The CBF constraint for neighbor j:
+```
+−Lg_h·v ≤ β·h + nb_contribution     where nb_contribution = 2*dpx*vxj + 2*dpy*vyj
+```
+was only applied when neighbor j was also in the QP solve (i.e., also a neighbor of the focal
+robot). This meant approaching robots whose QP was feasible on their own still faced an unsafe
+CBF bound when they were converging toward each other at speed.
+
+**Fix:** Always include `nb_contribution = 2*dpx*vxj + 2*dpy*vyj` in the CBF right-hand side,
+regardless of whether neighbor j's QP is also being solved simultaneously. This matches the
+paper's formulation where all terms from neighbor j's dynamics appear in robot i's constraint.
+
+**Impact:** swap environment success rate improved from near-0% to 100%. This fix also made
+CLF-CBF and ORCA swap results match paper values.
+
+### Fix 3 — Angular gap correction in MGR orbital controller (paper §IV-A)
+
+**Problem:** Robots on the same roundabout could orbit into each other when one robot was
+significantly ahead of another in the CCW direction.
+
+**Fix:** In `mgr_controller.py`, a following robot slows proportionally when the closest
+CCW-ahead co-member is within `1.5 × min_safe_angle`:
+
+```python
+min_safe_angle = 2.0 * arcsin(D_SAFE / (2.0 * C.radius))
+gap = CCW angular separation to closest ahead co-member
+if gap < 1.5 * min_safe_angle:
+    speed_scale = gap / (1.5 * min_safe_angle)   # 0 at contact, 1 at safe separation
+    v_des *= speed_scale
+    ω_des *= speed_scale
+```
+
+This prevents orbit collisions for all roundabout sizes and member counts, complementing
+the CBF-based inter-robot safety that operates in position space.

@@ -242,3 +242,47 @@ Baselines:
   16-gon approximations, rectangular obstacles to 4-vertex polygons. Operates holonomically
   (no unicycle conversion), matching the paper's treatment of ORCA as a holonomic baseline.
   Plugs into the same metrics infrastructure.
+
+---
+
+## Post-Phase Accuracy Fixes (applied after Phase 7 completion)
+
+The following fixes were applied to the simulation loop during accuracy validation.
+
+### Fix 1 — Robot map pre-construction for angular gap correction
+
+**Problem:** The angular gap check in `mgr_controller.py` needs a dict mapping robot ID → robot
+object to look up co-member positions. This was being constructed inside the controller call on
+every step, scanning all active robots repeatedly (O(N²) per timestep).
+
+**Fix:** The simulator now pre-constructs `robot_map = {r.id: r for r in active}` once per
+timestep and passes it to `run_mgr_update` and the escape checker. All angular gap lookups use
+this pre-built map.
+
+### Fix 2 — Cold-start fix for first-step QP
+
+**Problem:** On step 0, robots had no prior QP solution and `robot.velocity` was zero. The
+deadlock predictor used `robot.velocity` to compute predicted min-distance, so all robot pairs
+appeared non-deadlocked at t=0 even if they were placed head-on. This could delay MGR
+engagement by 1-2 steps.
+
+**Fix:** On step 0, `robot.velocity` is initialised to `V_MAX × unit_vec_to_goal` so the
+deadlock predictor has a realistic velocity estimate before the first QP solve.
+
+### Fix 3 — Directional v-scaling in right-hand rule
+
+**Problem:** The right-hand rule (RHR) overrides ω to steer clockwise around obstacles but
+left v unchanged. When a robot was at or past an obstacle surface in the SDF sense (sdf < 0),
+the QP would allow forward motion while the RHR steered away, causing the robot to advance
+into the obstacle before the RHR could redirect it.
+
+**Fix:** The RHR blending now also scales v proportionally when the robot is heading toward
+the obstacle (forward component of motion toward obstacle surface is positive):
+
+```python
+toward_obs = max(0.0, -np.dot([cos(θ), sin(θ)], sdf_grad))
+v = v * (1.0 - strength * toward_obs)
+```
+
+This preserves full speed when moving tangentially or away from obstacles, and reduces speed
+toward zero when heading directly into one — matching the physical intent of the right-hand rule.

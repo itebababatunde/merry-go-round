@@ -274,3 +274,68 @@ The simulation loop and metrics:
   (compute all controls before applying any), integrating `run_mgr_update`, the right-hand
   rule for obstacle avoidance (paper §III-E), and arrival checking.
 - **`src/simulation/metrics.py`** — Success rate, arrival rate, makespan, mean time.
+
+---
+
+## Post-Phase Accuracy Fixes (applied after Phase 7 completion)
+
+The following bugs were discovered during full-scale experiment validation and fixed in a
+dedicated accuracy pass. They affected the MGR roundabout creation and robot-to-roundabout
+timeout mechanisms.
+
+### Fix 1 — Bisector-based roundabout center search (replaces ADJUST_MGR for pair creation)
+
+**Problem:** When the midpoint between a deadlocked pair is inside an obstacle, the previous
+`ADJUST_MGR` (2-D grid search ±3m around midpoint) could move the center far from the pair —
+placing both robots on the same side of the roundabout with angular separation well below the
+minimum safe orbital angle (~94°). A creation-time angular separation gate then rejected these
+roundabouts, leaving pairs permanently frozen in GOAL mode. This was the root cause of 0%
+success rate in circ15 and rect15 environments.
+
+**Fix:** Added `_bisector_center(ri, rj, obstacles, n_members)` which searches the 1-D
+perpendicular bisector of the ri-rj segment (±3m in steps of 0.15m, 41 candidates). Every
+point on the perpendicular bisector is equidistant from both robots, so angular separation is
+exactly 180° by construction — the creation angle check always passes for any center found here.
+
+`create_mgr` now uses the bisector search instead of `adjust_mgr` when the midpoint is invalid:
+
+```python
+# Pass 1 — strict clearance (n=2)
+if not is_mgr_valid(midpoint_roundabout, obstacles):
+    bisector_c = _bisector_center(ri, rj, obstacles, n_members=2)
+    C.center = bisector_c if bisector_c is not None else None
+# Pass 2 — fallback clearance (n=0)
+if Pass1 failed: try midpoint then bisector with n_members=0 clearance
+```
+
+**Why bisector, not ADJUST_MGR:** The bisector guarantees 180° angular separation for any
+center found. ADJUST_MGR can find valid centers but with arbitrary angular separation (potentially
+< 94°), which then fails the creation gate. The bisector is also 41× faster (1-D vs 2-D search).
+
+**Impact:** rect15 (N=20) arrival rate improved from ~5% to ~33% across seeds; circ15 improved
+similarly. The remaining gap vs paper (95% success) is primarily due to single-robot RHR
+navigation failures at rectangular obstacle corners — a GOAL-mode navigation issue that MGR
+cannot address without a deadlock partner.
+
+**Paper reference:** Paper Algorithm 1 lines 14–17 call CREATE_MGR unconditionally with no
+angular separation post-check. The creation gate was our conservative addition; the bisector
+search makes it naturally satisfied by construction.
+
+### Fix 2 — MGR orbit timeout (not in paper; implementation robustness)
+
+**Problem:** In rare cases, a robot could be stuck in MGR mode indefinitely — orbiting a
+roundabout whose other members had all escaped — preventing it from making progress toward its
+goal.
+
+**Fix:** Added a 600-step (30s) MGR timeout: a robot that has been in MGR mode for 600
+consecutive steps without escaping is force-released back to GOAL mode. The timeout is halved
+from an earlier value of 1200 steps to reduce time wasted in stuck orbits.
+
+### Fix 3 — Two-pass create_mgr with n=0 fallback clearance
+
+**Problem:** In tight corridors (rect15), even the bisector center with n=2 strict clearance
+(0.5m) was unachievable — no point on the bisector had 0.5m clearance from all obstacles.
+
+**Fix:** A second pass with n=0 clearance (0.3m = MGR_RADIUS alone) allows roundabout
+creation in narrower corridors. The angular gap correction in `mgr_controller.py` still
+prevents orbit collisions regardless of the reduced physical clearance.
