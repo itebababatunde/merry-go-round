@@ -27,7 +27,7 @@ import numpy as np
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from experiments.config import DT, T_MAX, DELTA_COMM, D_SAFE, W_MAX, V_MAX
+from experiments.config import DT, T_MAX, DELTA_COMM, D_SAFE, W_MAX, V_MAX, K_RHO, K_ALPHA, EPSILON_GOAL
 import math as _math
 
 from src.robot import RobotMode
@@ -42,6 +42,17 @@ from src.simulation.metrics import compute_metrics
 _RHR_EPS = 1e-3
 # Heading gain for right-hand rule angular correction
 _RHR_K_TURN = 2.0
+
+# Obstacle-stuck escape parameters (GOAL mode only).
+# A robot is "stuck" when it is within D_SAFE of an obstacle surface AND nearly
+# stationary for _STUCK_STEPS consecutive steps. This happens when the goal
+# controller points into an obstacle that blocks the direct path; the CBF + RHR
+# pins the robot tangentially against the surface and it never escapes.
+_STUCK_OBS_THRESH  = D_SAFE       # proximity to obstacle surface that activates detection
+_STUCK_SPEED_THRESH = 0.05 * V_MAX # world-frame speed below which robot is "stuck" (0.04 m/s)
+_STUCK_STEPS       = 60            # consecutive steps before declaring stuck (3 s at DT=0.05)
+_ESCAPE_STEPS      = 80            # steps to execute escape maneuver (4 s)
+_ESCAPE_DIST       = 2.0 * DELTA_COMM  # distance from robot along outward normal for escape WP
 
 
 def _wrap_angle(angle: float) -> float:
@@ -132,6 +143,20 @@ def _right_hand_rule(robot, v: float, w: float, obstacles: list) -> tuple[float,
     return v_out, float(np.clip(w_blended, -W_MAX, W_MAX))
 
 
+def _goal_toward(robot, waypoint: np.ndarray) -> tuple[float, float]:
+    """goal_control directed at an arbitrary waypoint instead of robot.goal."""
+    dx = waypoint[0] - robot.pos[0]
+    dy = waypoint[1] - robot.pos[1]
+    rho = math.hypot(dx, dy)
+    if rho < 1e-6:
+        return 0.0, 0.0
+    phi = math.atan2(dy, dx)
+    alpha = _wrap_angle(phi - robot.theta)
+    v_des = min(K_RHO * rho, V_MAX)
+    w_des = float(np.clip(K_ALPHA * alpha, -W_MAX, W_MAX))
+    return v_des, w_des
+
+
 class Simulator:
     """
     Runs a single simulation instance to completion or T_MAX timeout.
@@ -184,6 +209,11 @@ class Simulator:
         qp_info_map: dict = {}
         next_id: int = 0
 
+        # Per-robot obstacle-stuck escape state (GOAL mode only)
+        stuck_count      = {r.id: 0   for r in robots}
+        escape_remaining = {r.id: 0   for r in robots}
+        escape_wp        = {r.id: None for r in robots}
+
         n_steps = int(T_MAX / DT)
         min_dist_overall = float('inf')
         t = 0.0
@@ -233,7 +263,39 @@ class Simulator:
 
                 # Reference velocity from mode-appropriate controller
                 if r.mode == RobotMode.GOAL:
-                    v_des, w_des = goal_control(r)
+                    if escape_remaining[r.id] > 0:
+                        # Active escape maneuver: steer toward obstacle-escape waypoint
+                        escape_remaining[r.id] -= 1
+                        wp = escape_wp[r.id]
+                        if float(np.linalg.norm(r.pos - wp)) < 2 * EPSILON_GOAL:
+                            escape_remaining[r.id] = 0  # reached waypoint early
+                        v_des, w_des = _goal_toward(r, wp)
+                    else:
+                        # Stuck detection: near obstacle surface + near-zero speed
+                        speed    = float(np.linalg.norm(r.velocity))
+                        obs_d    = min((obs.sdf(r.pos) for obs in obstacles),
+                                       default=float('inf'))
+                        if obs_d < _STUCK_OBS_THRESH and speed < _STUCK_SPEED_THRESH:
+                            stuck_count[r.id] += 1
+                        else:
+                            stuck_count[r.id] = 0
+
+                        if stuck_count[r.id] >= _STUCK_STEPS and obstacles:
+                            # Compute escape waypoint along outward obstacle normal
+                            near = min(obstacles, key=lambda o: o.sdf(r.pos))
+                            grad = _sdf_gradient(near, r.pos)
+                            gn   = float(np.linalg.norm(grad))
+                            if gn > 1e-8:
+                                n_hat = grad / gn
+                                wp = np.clip(
+                                    r.pos + _ESCAPE_DIST * n_hat,
+                                    D_SAFE, self.env.size - D_SAFE
+                                )
+                                escape_wp[r.id]        = wp
+                                escape_remaining[r.id] = _ESCAPE_STEPS
+                                stuck_count[r.id]      = 0
+
+                        v_des, w_des = goal_control(r)
                 else:
                     C = roundabouts.get(r.roundabout_id)
                     if C is None:
