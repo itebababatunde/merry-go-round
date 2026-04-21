@@ -44,15 +44,18 @@ _RHR_EPS = 1e-3
 _RHR_K_TURN = 2.0
 
 # Obstacle-stuck escape parameters (GOAL mode only).
-# A robot is "stuck" when it is within D_SAFE of an obstacle surface AND nearly
-# stationary for _STUCK_STEPS consecutive steps. This happens when the goal
-# controller points into an obstacle that blocks the direct path; the CBF + RHR
-# pins the robot tangentially against the surface and it never escapes.
-_STUCK_OBS_THRESH  = D_SAFE       # proximity to obstacle surface that activates detection
-_STUCK_SPEED_THRESH = 0.05 * V_MAX # world-frame speed below which robot is "stuck" (0.04 m/s)
-_STUCK_STEPS       = 60            # consecutive steps before declaring stuck (3 s at DT=0.05)
-_ESCAPE_STEPS      = 80            # steps to execute escape maneuver (4 s)
-_ESCAPE_DIST       = 2.0 * DELTA_COMM  # distance from robot along outward normal for escape WP
+# A robot is "stuck" when it is within D_SAFE of an obstacle surface AND has
+# made less than _PROGRESS_THRESH progress toward its goal over the last
+# _STUCK_WINDOW steps. Goal-progress detection is more discriminating than
+# speed-based detection: a robot legitimately navigating around a circular
+# obstacle will still close distance to its goal over 1.5 s, while a robot
+# trapped in a rect15 corner makes zero goal progress for many seconds.
+_STUCK_OBS_THRESH  = D_SAFE           # proximity threshold to obstacle surface
+_PROGRESS_THRESH   = 0.05             # m — minimum goal progress per window
+_STUCK_WINDOW      = 30               # steps per progress-check window (1.5 s at DT=0.05)
+_STUCK_WINDOWS_REQ = 2                # consecutive no-progress windows to trigger (3 s total)
+_ESCAPE_STEPS      = 80               # steps to execute escape maneuver (4 s)
+_ESCAPE_DIST       = 2.0 * DELTA_COMM # distance from robot for escape WP
 
 
 def _wrap_angle(angle: float) -> float:
@@ -210,7 +213,9 @@ class Simulator:
         next_id: int = 0
 
         # Per-robot obstacle-stuck escape state (GOAL mode only)
-        stuck_count      = {r.id: 0   for r in robots}
+        stuck_windows    = {r.id: 0   for r in robots}   # consecutive no-progress windows
+        window_ref_dist  = {r.id: float('inf') for r in robots}  # dist-to-goal at window start
+        window_step      = {r.id: 0   for r in robots}   # step when current window started
         escape_remaining = {r.id: 0   for r in robots}
         escape_wp        = {r.id: None for r in robots}
 
@@ -271,29 +276,60 @@ class Simulator:
                             escape_remaining[r.id] = 0  # reached waypoint early
                         v_des, w_des = _goal_toward(r, wp)
                     else:
-                        # Stuck detection: near obstacle surface + near-zero speed
-                        speed    = float(np.linalg.norm(r.velocity))
-                        obs_d    = min((obs.sdf(r.pos) for obs in obstacles),
-                                       default=float('inf'))
-                        if obs_d < _STUCK_OBS_THRESH and speed < _STUCK_SPEED_THRESH:
-                            stuck_count[r.id] += 1
-                        else:
-                            stuck_count[r.id] = 0
+                        # Stuck detection: near obstacle AND no goal progress over window.
+                        # At window boundaries, compare current dist-to-goal against the
+                        # dist recorded at the start of the window. If improvement is less
+                        # than _PROGRESS_THRESH AND the robot is within D_SAFE of an
+                        # obstacle, increment the no-progress window counter.
+                        curr_dist = r.dist_to_goal()
+                        obs_d = min((obs.sdf(r.pos) for obs in obstacles),
+                                    default=float('inf'))
 
-                        if stuck_count[r.id] >= _STUCK_STEPS and obstacles:
-                            # Compute escape waypoint along outward obstacle normal
+                        if window_ref_dist[r.id] == float('inf'):
+                            window_ref_dist[r.id] = curr_dist
+                            window_step[r.id]     = step
+
+                        if step - window_step[r.id] >= _STUCK_WINDOW:
+                            progress = window_ref_dist[r.id] - curr_dist
+                            window_ref_dist[r.id] = curr_dist
+                            window_step[r.id]     = step
+                            if obs_d < _STUCK_OBS_THRESH and progress < _PROGRESS_THRESH:
+                                stuck_windows[r.id] += 1
+                            else:
+                                stuck_windows[r.id] = 0
+
+                        if stuck_windows[r.id] >= _STUCK_WINDOWS_REQ and obstacles:
+                            # Compute goal-biased escape waypoint:
+                            # blend outward obstacle normal (70%) with the lateral
+                            # tangent direction that faces toward the goal (30%).
+                            # Pure outward escape leaves the robot facing away from
+                            # the goal half the time; the lateral bias steers it to
+                            # the goal's side of the obstacle from the start.
                             near = min(obstacles, key=lambda o: o.sdf(r.pos))
                             grad = _sdf_gradient(near, r.pos)
                             gn   = float(np.linalg.norm(grad))
                             if gn > 1e-8:
-                                n_hat = grad / gn
+                                n_hat    = grad / gn
+                                goal_dir = r.goal - r.pos
+                                gd_norm  = float(np.linalg.norm(goal_dir))
+                                if gd_norm > 1e-6:
+                                    goal_dir = goal_dir / gd_norm
+                                # Pick the tangent direction (±90° from normal) that
+                                # has positive dot product with the goal direction
+                                t_cw  = np.array([ n_hat[1], -n_hat[0]])
+                                t_ccw = np.array([-n_hat[1],  n_hat[0]])
+                                t_hat = (t_cw if np.dot(t_cw, goal_dir) >= np.dot(t_ccw, goal_dir)
+                                         else t_ccw)
+                                bias_dir = 0.7 * n_hat + 0.3 * t_hat
+                                bias_dir /= float(np.linalg.norm(bias_dir))
                                 wp = np.clip(
-                                    r.pos + _ESCAPE_DIST * n_hat,
+                                    r.pos + _ESCAPE_DIST * bias_dir,
                                     D_SAFE, self.env.size - D_SAFE
                                 )
                                 escape_wp[r.id]        = wp
                                 escape_remaining[r.id] = _ESCAPE_STEPS
-                                stuck_count[r.id]      = 0
+                                stuck_windows[r.id]    = 0
+                                window_ref_dist[r.id]  = float('inf')
 
                         v_des, w_des = goal_control(r)
                 else:
