@@ -119,7 +119,7 @@ if __name__ == '__main__':
     tasks = [t for t in all_tasks if (t[0], t[1], t[2], t[3]) not in done]
     skipped = len(all_tasks) - len(tasks)
 
-    n_workers = 1
+    n_workers = 10
     print(f"Starting {total} runs on {n_workers} workers → {out_path}")
     if skipped:
         print(f"Resuming: {skipped} already done, {len(tasks)} remaining.")

@@ -115,7 +115,7 @@ def is_escapable(robot, C, all_robots: list,
     # Sector parameters
     delta_theta = (DELTA_THETA_FREE if env_type in ('free', 'swap')
                    else DELTA_THETA_OBS)
-    sector_radius = C.radius + DELTA_COMM  # C.r + δsensing (paper: uses ring radius, not actual dist)
+    sector_radius = C.radius + DELTA_COMM    # C.r + δcomm sensing range beyond orbit
 
     # Pre-escape proximity safety check: only block escape if a non-co-member
     # robot is within D_SAFE AND is inside the escape sector (i.e., directly
