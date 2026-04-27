@@ -52,10 +52,12 @@ K_D = 1.0                   # deadlock prediction multiplier (Eq. 11); 1 ≤ K_D
 T_DEADLOCK = 2.0            # s — deadlock prediction horizon
 
 DELTA_COMM = 1.0            # m — communication / sensing range δ_comm
+DELTA_DEADLOCK = DELTA_COMM  # m — deadlock detection range (= δ_comm; robots face
+                              #     goal at spawn so no pre-deflection offset)
 
-DELTA_C = 2.0               # m — roundabout proximity threshold δ_c:
-                             #     join existing roundabout if candidate center
-                             #     is within DELTA_C of an existing one
+DELTA_C      = 2.0          # m — roundabout proximity threshold δ_c (obstacle envs)
+DELTA_C_SWAP = 16.0         # m — workspace-wide δ_c for swap: all head-on pairs
+                             #     join the first-created roundabout regardless of y
 
 MGR_RADIUS = 0.3            # m — initial roundabout radius C.r (paper §V-A: "C.r = 0.3 m")
 K_INCREMENT = 0.1           # m — radius increment per extra member robot
@@ -80,14 +82,14 @@ EPSILON_GOAL = R_SAFE - 0.01      # m ≈ 0.21 m
 DT   = 0.05                 # s — simulation timestep
 T_MAX = 120.0               # s — 2-minute timeout per instance
 
-N_INSTANCES = 5             # number of random instances per (env, N) combination
+N_INSTANCES = 20            # number of random instances per (env, N) combination
 
 # ---------------------------------------------------------------------------
 # Experiment configurations  (robot counts per environment)
 # ---------------------------------------------------------------------------
 ROBOT_COUNTS = {
-    "free":   [20],
-    "circ15": [20],
-    "rect15": [20],
-    "swap":   [20],
+    "free":   [20, 40, 60, 80],
+    "circ15": [20, 40, 60],
+    "rect15": [20, 40, 60],
+    "swap":   [20, 40, 60],
 }

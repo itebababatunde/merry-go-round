@@ -27,7 +27,7 @@ import numpy as np
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from experiments.config import DT, T_MAX, DELTA_COMM, D_SAFE, W_MAX, V_MAX, K_RHO, K_ALPHA, EPSILON_GOAL
+from experiments.config import DT, T_MAX, DELTA_COMM, D_SAFE, W_MAX, V_MAX, K_RHO, K_ALPHA, EPSILON_GOAL, DELTA_C, DELTA_C_SWAP
 import math as _math
 
 from src.robot import RobotMode
@@ -233,8 +233,10 @@ class Simulator:
             # Step 1 — MGR update (Algorithm 1, lines 1–27)
             # ----------------------------------------------------------
             if use_mgr:
+                dc = DELTA_C_SWAP if self.env.env_type == 'swap' else DELTA_C
                 next_id = run_mgr_update(
-                    active, roundabouts, obstacles, qp_info_map, next_id
+                    active, roundabouts, obstacles, qp_info_map, next_id,
+                    delta_c=dc,
                 )
 
             # ----------------------------------------------------------

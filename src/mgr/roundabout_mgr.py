@@ -22,7 +22,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from experiments.config import (
-    MGR_RADIUS, DELTA_COMM, DELTA_C, WORKSPACE, D_SAFE as _D_SAFE
+    MGR_RADIUS, DELTA_COMM, DELTA_DEADLOCK, DELTA_C, WORKSPACE, D_SAFE as _D_SAFE
 )
 from src.robot import RobotMode
 from src.mgr.roundabout import Roundabout
@@ -264,6 +264,7 @@ def run_mgr_update(
     obstacles: list,
     qp_info_map: dict,
     next_id: int = 0,
+    delta_c: float = DELTA_C,
 ) -> int:
     """
     Run one step of Algorithm 1 for all active robots.
@@ -391,7 +392,7 @@ def run_mgr_update(
             if key in seen:
                 continue
             seen.add(key)
-            if np.linalg.norm(ri.pos - rj.pos) > DELTA_COMM:
+            if np.linalg.norm(ri.pos - rj.pos) > DELTA_DEADLOCK:
                 continue
             flags_j = qp_info_map.get(rj.id, {}).get('deadlock_flags', set())
             combined_flags = flags_i | {rid for rid in flags_j if rid == ri.id}
@@ -421,10 +422,10 @@ def run_mgr_update(
 
         c = find_center(ri, rj)
 
-        # Check if an existing roundabout is within DELTA_C of c
+        # Check if an existing roundabout is within delta_c of c
         nearby = [
             C for C in roundabouts.values()
-            if np.linalg.norm(C.center - c) <= DELTA_C
+            if np.linalg.norm(C.center - c) <= delta_c
         ]
 
         if nearby:

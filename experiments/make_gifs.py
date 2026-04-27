@@ -34,6 +34,7 @@ for env in ENVS:
         print(f'Rendering {env}/{method} → {out_path} ...', end=' ', flush=True)
 
         env_obj, robots = generate_instance(env, N, IDX)
+        goals = [r.goal.tolist() for r in robots]
 
         if method == 'orca':
             sim = OrcaSimulator(env_obj, robots, record_every=5)
@@ -42,7 +43,7 @@ for env in ENVS:
 
         sim.run()
         render_animation(sim.get_history(), env_obj, method=method,
-                         output_path=str(out_path), fps=10)
+                         goals=goals, output_path=str(out_path), fps=10)
         print('done')
 
 print('\nAll 12 GIFs written to results/')

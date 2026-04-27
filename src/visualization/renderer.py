@@ -68,6 +68,20 @@ def _robot_color(r: dict) -> str:
     return _COLOR_MGR if r['mode'] == 'MGR' else _COLOR_GOAL
 
 
+def _car_polygon_xy(pos, theta, r=_ROBOT_DRAW_R):
+    """Return (5,2) array of car-shaped polygon vertices at pos heading theta."""
+    local = np.array([
+        [ 1.0,  0.0],   # front tip (nose)
+        [ 0.4,  0.7],   # front-right shoulder
+        [-0.8,  0.6],   # rear-right
+        [-0.8, -0.6],   # rear-left
+        [ 0.4, -0.7],   # front-left shoulder
+    ]) * r
+    c, s = np.cos(theta), np.sin(theta)
+    rot = np.array([[c, -s], [s, c]])
+    return (local @ rot.T) + np.asarray(pos)
+
+
 def _draw_static(ax, env, goals: list) -> None:
     """Draw workspace boundary, obstacles, and goal markers (static elements)."""
     # Workspace boundary
@@ -111,6 +125,7 @@ def render_animation(
     output_path: str | None = None,
     fps: int = 10,
     show: bool = False,
+    goals: list | None = None,
 ) -> FuncAnimation:
     """
     Build a FuncAnimation from a Simulator / OrcaSimulator history list.
@@ -150,7 +165,7 @@ def render_animation(
     # We can't reconstruct goals from history alone; pass None if unavailable.
     # The demo entry point passes goals separately; API accepts history only.
     # Goals are drawn from a separate argument if provided.
-    goals  = []   # populated below if goal positions are embedded
+    goals = goals or []
 
     # ----------------------------------------------------------------
     # Figure / axes setup
@@ -165,32 +180,20 @@ def render_animation(
     _draw_static(ax, env, goals)
 
     # ----------------------------------------------------------------
-    # Dynamic artists — robots
+    # Dynamic artists — robots (car-shaped polygons)
     # ----------------------------------------------------------------
-    robot_circles = []
-    robot_arrows  = []   # FancyArrow patches
+    robot_polys = []
 
     for r in snap0['robots']:
-        pos   = r['pos']
+        pos   = np.array(r['pos'])
+        theta = r['theta']
         color = _robot_color(r)
-
-        circle = mpatches.Circle(pos, _ROBOT_DRAW_R,
+        xy    = _car_polygon_xy(pos, theta)
+        poly  = mpatches.Polygon(xy, closed=True,
                                  facecolor=color, edgecolor='white',
                                  linewidth=0.5, zorder=5)
-        ax.add_patch(circle)
-        robot_circles.append(circle)
-
-        # Heading arrow (not shown for ORCA since theta is meaningless)
-        theta = r['theta']
-        dx    = _ARROW_LEN * np.cos(theta)
-        dy    = _ARROW_LEN * np.sin(theta)
-        arrow = ax.annotate(
-            '', xy=(pos[0] + dx, pos[1] + dy), xytext=(pos[0], pos[1]),
-            arrowprops=dict(arrowstyle='->', color=_COLOR_ARROW,
-                            lw=0.8, mutation_scale=8),
-            zorder=6,
-        )
-        robot_arrows.append(arrow)
+        ax.add_patch(poly)
+        robot_polys.append(poly)
 
     # ----------------------------------------------------------------
     # Dynamic artists — roundabout rings
@@ -227,23 +230,13 @@ def render_animation(
 
         n_arrived = sum(1 for r in robots_snap if r['arrived'])
 
-        # — Update robot circles and arrows —
+        # — Update robot car polygons —
         for i, r in enumerate(robots_snap):
-            pos   = r['pos']
-            color = _robot_color(r)
+            pos   = np.array(r['pos'])
             theta = r['theta']
-
-            robot_circles[i].set_center(pos)
-            robot_circles[i].set_facecolor(color)
-
-            # Update arrow: reposition by mutating xyann (tail) and xy (head)
-            dx = _ARROW_LEN * np.cos(theta)
-            dy = _ARROW_LEN * np.sin(theta)
-            robot_arrows[i].xy       = (pos[0] + dx, pos[1] + dy)
-            robot_arrows[i].xyann   = (pos[0], pos[1])
-            # Hide arrow for arrived robots or ORCA (theta always 0 → not meaningful)
-            visible = (not r['arrived']) and (method != 'orca')
-            robot_arrows[i].set_visible(visible)
+            color = _robot_color(r)
+            robot_polys[i].set_xy(_car_polygon_xy(pos, theta))
+            robot_polys[i].set_facecolor(color)
 
         # — Sync roundabout rings —
         active_ids = {rd['id'] for rd in rounds_snap}
@@ -277,8 +270,7 @@ def render_animation(
             f"arrived = {n_arrived} / {N}"
         )
 
-        return (robot_circles + robot_arrows +
-                list(roundabout_patches.values()) + [title])
+        return robot_polys + list(roundabout_patches.values()) + [title]
 
     # ----------------------------------------------------------------
     # Build FuncAnimation

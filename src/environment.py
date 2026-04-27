@@ -186,7 +186,8 @@ class Environment:
     def _generate_rectangular_obstacles(self) -> None:
         """
         Rejection-sample rectangular obstacles until coverage ≥ 15 %.
-        Half-widths and half-heights drawn from [0.2, 0.5] m each.
+        Half-widths and half-heights drawn from [0.5, 1.2] m each,
+        producing ~14 large rectangles matching paper Fig. 5.
         """
         covered = 0.0
         max_attempts = 50_000
@@ -194,8 +195,8 @@ class Environment:
 
         while covered < TARGET_OBS_AREA and attempt < max_attempts:
             attempt += 1
-            hw = float(self.rng.uniform(0.2, 0.5))
-            hh = float(self.rng.uniform(0.2, 0.5))
+            hw = float(self.rng.uniform(0.5, 1.2))
+            hh = float(self.rng.uniform(0.5, 1.2))
             margin = max(hw, hh) + D_SAFE
             x  = float(self.rng.uniform(margin, self.size - margin))
             y  = float(self.rng.uniform(margin, self.size - margin))

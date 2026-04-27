@@ -12,6 +12,7 @@ Usage
 """
 
 import hashlib
+import math
 import sys
 import os
 
@@ -61,7 +62,12 @@ def generate_instance(env_type: str, N: int, instance_idx: int):
     rng = np.random.default_rng(seed)
     env = Environment(env_type, rng)
     starts, goals = env.generate_starts_goals(N)
-    robots = [Robot(i, starts[i], 0.0, goals[i]) for i in range(N)]
+    robots = [
+        Robot(i, starts[i],
+              math.atan2(goals[i][1] - starts[i][1], goals[i][0] - starts[i][0]),
+              goals[i])
+        for i in range(N)
+    ]
     return env, robots
 
 
